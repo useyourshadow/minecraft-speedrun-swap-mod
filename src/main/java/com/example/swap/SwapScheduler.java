@@ -4,85 +4,141 @@ import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraft.server.MinecraftServer;
-import net.minecraftforge.fml.server.ServerLifecycleHooks;
+import net.minecraftforge.server.ServerLifecycleHooks;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.phys.Vec3;
-import com.example.playerdata.PlayerDataProvider;
-import com.example.playerdata.PlayerData;
 import com.example.queue.PlayerQueueManager;
-import com.example.examplemod.Config;
+import com.example.playerdata.PlayerData;
 
-import java.util.List;
+import java.util.*;
 
 @Mod.EventBusSubscriber
 public class SwapScheduler {
 
-    private static int tickCounter = 0;
-    private static boolean timerActive = false;
+    private static final int BASE_SECONDS_PER_SWAP = 60;
     private static final int TICKS_PER_SECOND = 20;
-    private static final int SECONDS_PER_SWAP = Config.swapIntervalMinutes * 60;
-    private static final int TICKS_PER_SWAP = TICKS_PER_SECOND * SECONDS_PER_SWAP;
 
+    private static boolean timerActive = false;
+    private static boolean randomSwapActive = false;
+    private static int swapTimerTicks = BASE_SECONDS_PER_SWAP * TICKS_PER_SECOND;
 
+    // Start speedrun swap (shared countdown)
     public static void startTimer() {
-        tickCounter = 0;
+        if (timerActive) return;
         timerActive = true;
+        randomSwapActive = false;
+        swapTimerTicks = BASE_SECONDS_PER_SWAP * TICKS_PER_SECOND;
+    }
+
+    // Start random swap mode (uses same countdown)
+    public static void startRandomSwap() {
+        if (timerActive) return;
+        randomSwapActive = true;
+        timerActive = false;
+        swapTimerTicks = BASE_SECONDS_PER_SWAP * TICKS_PER_SECOND;
     }
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (!timerActive || event.phase != TickEvent.Phase.END) return;
+        if (!timerActive && !randomSwapActive) return;
+        if (event.phase != TickEvent.Phase.END) return;
 
-        tickCounter++;
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server == null) return;
 
-        // Show countdown only to players in the queue
-        int secondsLeft = Math.max(0, (TICKS_PER_SWAP - tickCounter) / TICKS_PER_SECOND);
-        for (ServerPlayer player : ServerLifecycleHooks.getCurrentServer().getPlayerList().getPlayers()) {
-            if (PlayerQueueManager.queueSize() > 0) {
-                player.displayClientMessage(Component.literal("§eSwap in: " + secondsLeft + "s"), true);
-            }
+        // decrement shared countdown
+        swapTimerTicks--;
+        int secondsLeft = Math.max(0, swapTimerTicks / TICKS_PER_SECOND);
+
+        // show countdown to all players above name using scoreboard
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            player.displayClientMessage(Component.literal("§eNext swap in: " + secondsLeft + "s"), true);
         }
 
-        if (tickCounter >= TICKS_PER_SWAP) {
-            tickCounter = 0;
-            swapPlayers();
+        // trigger swap when timer reaches 0
+        if (swapTimerTicks <= 0) {
+            if (randomSwapActive) randomSwapAll();
+            else if (timerActive) swapPlayers();
+
+            // reset timer
+            swapTimerTicks = BASE_SECONDS_PER_SWAP * TICKS_PER_SECOND;
         }
     }
 
+    // Random swap: everyone is swapped, no one swaps with themselves
+    public static void randomSwapAll() {
+        List<ServerPlayer> queue = PlayerQueueManager.getQueue();
+        int n = queue.size();
+        if (n < 2) return;
+
+        List<ServerPlayer> shuffled;
+        boolean valid;
+
+        do {
+            shuffled = new ArrayList<>(queue);
+            Collections.shuffle(shuffled);
+
+            // check that no one stays in the same position
+            valid = true;
+            for (int i = 0; i < n; i++) {
+                if (queue.get(i) == shuffled.get(i)) {
+                    valid = false;
+                    break;
+                }
+            }
+        } while (!valid);
+
+        Set<ServerPlayer> swapped = new HashSet<>();
+        for (int i = 0; i < n; i++) {
+            ServerPlayer original = queue.get(i);
+            ServerPlayer target = shuffled.get(i);
+
+            if (swapped.contains(original)) continue;
+
+            PlayerData snapOriginal = new PlayerData(original);
+            PlayerData snapTarget = new PlayerData(target);
+
+            var posOriginal = original.position();
+            var posTarget = target.position();
+            original.teleportTo(target.serverLevel(), posTarget.x, posTarget.y, posTarget.z, target.getYRot(), target.getXRot());
+            target.teleportTo(original.serverLevel(), posOriginal.x, posOriginal.y, posOriginal.z, original.getYRot(), original.getXRot());
+
+            snapTarget.restore(original);
+            snapOriginal.restore(target);
+
+            swapped.add(original);
+            swapped.add(target);
+
+            original.displayClientMessage(Component.literal("§aYou have been randomly swapped!"), false);
+            target.displayClientMessage(Component.literal("§aYou have been randomly swapped!"), false);
+        }
+    }
+
+
+
+    // Regular swap: swap first two players in queue
     private static void swapPlayers() {
-        ServerPlayer[] players = PlayerQueueManager.popTwoPlayers();
-        if (players == null) return;
+        List<ServerPlayer> queue = PlayerQueueManager.getQueue();
+        if (queue.size() < 2) return;
 
-        ServerPlayer a = players[0];
-        ServerPlayer b = players[1];
+        ServerPlayer first = queue.get(0);
+        ServerPlayer second = queue.get(1);
 
-        // Swap positions
-        Vec3 posA = a.position();
-        Vec3 posB = b.position();
-        a.teleportTo(b.serverLevel(), posB.x, posB.y, posB.z, b.getYRot(), b.getXRot());
-        b.teleportTo(a.serverLevel(), posA.x, posA.y, posA.z, a.getYRot(), a.getXRot());
+        PlayerData snapFirst = new PlayerData(first);
+        PlayerData snapSecond = new PlayerData(second);
 
-        // Swap inventories
-        CompoundTag invA = a.getInventory().save(new CompoundTag());
-        CompoundTag invB = b.getInventory().save(new CompoundTag());
-        a.getInventory().load(invB);
-        b.getInventory().load(invA);
+        var posFirst = first.position();
+        var posSecond = second.position();
+        first.teleportTo(second.serverLevel(), posSecond.x, posSecond.y, posSecond.z, second.getYRot(), second.getXRot());
+        second.teleportTo(first.serverLevel(), posFirst.x, posFirst.y, posFirst.z, first.getYRot(), first.getXRot());
 
-        // Swap custom PlayerData
-        a.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(dataA ->
-                b.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(dataB -> {
-                    CompoundTag tagA = new CompoundTag();
-                    CompoundTag tagB = new CompoundTag();
-                    dataA.saveNBTData(tagA);
-                    dataB.saveNBTData(tagB);
-                    dataA.loadNBTData(tagB);
-                    dataB.loadNBTData(tagA);
-                })
-        );
+        snapSecond.restore(first);
+        snapFirst.restore(second);
 
-        // Push players back to queue
-        PlayerQueueManager.pushBack(a, b);
+        first.displayClientMessage(Component.literal("§aYou have been swapped!"), false);
+        second.displayClientMessage(Component.literal("§aYou have been swapped!"), false);
+
+        PlayerQueueManager.leaveQueue(first);
+        PlayerQueueManager.push(first);
     }
 }

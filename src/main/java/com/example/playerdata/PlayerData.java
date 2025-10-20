@@ -1,66 +1,68 @@
 package com.example.playerdata;
-import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.ListTag;
+
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.ContainerHelper;
+
 import java.util.ArrayList;
 import java.util.List;
 
 public class PlayerData {
-    private int health;
-    private int oxygen;
-    private int hunger;
-    private boolean switched;
-    private boolean proned;
-    private List<ItemStack> inventory = new ArrayList<>();
+    public float health;
+    public int food;
+    public int air;
+    public int fireTicks;
+    public boolean isFlying;
+    public int xpTotal;
+    public int xpLevel;
+    public float xpProgress;
+    public List<MobEffectInstance> effects;
+    public List<ItemStack> inventory;
+    public List<ItemStack> armor;
+    public ItemStack offhand;
 
-    public int getHealth() { return health; }
-    public void setHealth(int health) { this.health = health;}
+    public PlayerData(ServerPlayer p) {
+        health = p.getHealth();
+        food = p.getFoodData().getFoodLevel();
+        air = p.getAirSupply();
+        fireTicks = p.getRemainingFireTicks();
+        isFlying = p.getAbilities().flying;
+        xpTotal = p.totalExperience;
+        xpLevel = p.experienceLevel;
+        xpProgress = p.experienceProgress;
 
-    public int getOxygen() { return oxygen; }
-    public void setOxygen(int oxygen){this.oxygen = oxygen;}
-
-    public int getHunger(){return hunger;}
-    public void setHunger(int hunger){this.hunger = hunger;}
-
-    public boolean isSwitched(){return switched;}
-    public void setSwitched(boolean switched){this.switched = switched;}
-
-    public boolean isProned(){return proned;}
-    public void setProned(boolean proned){this.proned = proned;}
-
-    public List<ItemStack> getInventory(){return inventory;}
-    public void setInventory(List<ItemStack> inventory){this.inventory = inventory;}
-
-    // Minecraft saves data in NBT tags so we use this to serialize
-    public void saveNBTData(CompoundTag tag){
-        tag.putInt("Health",health);
-        tag.putInt("Oxygen",oxygen);
-        tag.putInt("Hunger",hunger);
-        tag.putBoolean("Switched",switched);
-        tag.putBoolean("Proned",proned);
-
-        ListTag listTag = new ListTag();
-        for (ItemStack stack : inventory){
-            CompoundTag compoundTag = new CompoundTag();
-            stack.save(stackTag);
-            listTag.add(stackTag);
-        }
-        tag.put("Inventory",listTag);
+        effects = new ArrayList<>(p.getActiveEffects());
+        inventory = new ArrayList<>();
+        armor = new ArrayList<>();
+        for (ItemStack stack : p.getInventory().items) inventory.add(stack.copy());
+        for (ItemStack stack : p.getInventory().armor) armor.add(stack.copy());
+        offhand = p.getInventory().offhand.get(0).copy();
     }
 
-    public void loadNBTData(CompoundTag tag){
-        health = tag.getInt("Health");
-        oxygen = tag.getInt("Oxygen");
-        hunger = tag.getInt("Hunger");
-        switched = tag.getBoolean("Switched");
-        proned = tag.getBoolean("Proned");
+    public void restore(ServerPlayer p) {
+        // Restore inventory
+        p.getInventory().clearContent();
+        for (int i = 0; i < inventory.size(); i++) p.getInventory().items.set(i, inventory.get(i).copy());
+        for (int i = 0; i < armor.size(); i++) p.getInventory().armor.set(i, armor.get(i).copy());
+        p.getInventory().offhand.set(0, offhand.copy());
+        p.inventoryMenu.broadcastChanges();
 
-        inventory.clear();
-        ListTag listTag = tag.getList("Inventory",10);
-        for (int i= 0; i<listTag.size(); i++){
-            CompoundTag stackTag = listTag.getCompound(i);
-            inventory.add(ItemStack.of(stackTag));
+        // Restore core stats
+        p.setHealth(health);
+        p.getFoodData().setFoodLevel(food);
+        p.setAirSupply(air);
+        p.setRemainingFireTicks(fireTicks);
+        p.getAbilities().flying = isFlying;
+
+        // Restore XP
+        p.totalExperience = xpTotal;
+        p.experienceLevel = xpLevel;
+        p.experienceProgress = xpProgress;
+
+        // Restore effects
+        p.removeAllEffects();
+        for (MobEffectInstance effect : effects) {
+            p.addEffect(new MobEffectInstance(effect));
         }
     }
 }
